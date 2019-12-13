@@ -3,6 +3,7 @@ package ru.hemulen;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.swing.plaf.nimbus.State;
 import java.sql.*;
 import java.util.Properties;
 
@@ -21,7 +22,9 @@ public class H2Connection {
             LOG.error(e.getMessage());
         }
         try {
+            LOG.info("Начало подключения к базе данных H2.");
             conn = DriverManager.getConnection(H2Url, props.getProperty("USER"), props.getProperty("PASS"));
+            LOG.info("Подключение к базе данных H2 установлено.");
         } catch (SQLException e) {
             LOG.error(String.format("Не удалось подключиться к базе данных ", h2Path));
             LOG.error(e.getMessage());
@@ -32,7 +35,7 @@ public class H2Connection {
     public void close() {
         try {
             conn.close();
-            LOG.info("Соединение с базой данных H2 закрыто.");
+            LOG.info("Подключение к базе данных H2 закрыто.");
         } catch (SQLException e) {
             LOG.error("Не удалось закрыть соединение с базой данных H2.");
             LOG.error(e.getMessage());
@@ -45,106 +48,119 @@ public class H2Connection {
      */
     public void clearDB() {
         LOG.info("Начало очистки базы данных H2:");
-        ResultSet wasteResponses = getWasteResponses();
-        ResultSet wasteRequests = getWasteRequests();
-        // Сначала удаляем ответы
-        LOG.info("Начало удаления ответов на запросы в финальных статусах.");
-        deleteMessages(wasteResponses);
-        LOG.info("Ответы на запросы в финальных статусах удалены.");
-        // Потом удаляем запросы
-        LOG.info("Начало удаления запросов в финальных статусах.");
-        deleteMessages(wasteRequests);
-        LOG.info("Запросы в финальных статусах удалены.");
+        try {
+            getWasteRequests();
+            getWasteResponses();
+            deleteMessages();
+        } catch (SQLException e) {
+            LOG.error(e.getMessage());
+            return;
+        } finally {
+            dropTempTables();
+        }
         LOG.info("База данных H2 очищена.");
     }
 
     /**
-     * Метод возвращает набор идентификаторов запросов,
+     * Метод создает таблицу REQ_TMP и наполняет ее идентификаторами запросов,
      * на которые получены финальные ответы ('REJECT', 'ERROR' или 'MESSAGE')
      *
-     * @return Набор идентификаторов запросов в финальных статусах
+     * @return Количество всех запросов в финальном статусе
      */
-    private ResultSet getWasteRequests() {
+    private void getWasteRequests() throws SQLException {
         try {
-            String sql = "SELECT \n" +
-                    "MM.REFERENCE_ID\n" +
-                    "FROM CORE.MESSAGE_CONTENT MC\n" +
-                    "LEFT JOIN CORE.MESSAGE_METADATA MM ON MC.ID = MM.ID\n" +
+            String sql = "CREATE TABLE REQ_TMP AS \n" +
+                    "(SELECT MM.REFERENCE_ID\n" +
+                    "FROM CORE.MESSAGE_METADATA MM\n" +
+                    "LEFT JOIN CORE.MESSAGE_CONTENT MC ON MC.ID = MM.ID\n" +
                     "WHERE MC.MODE IN ('MESSAGE', 'REJECT', 'ERROR')\n" +
-                    "AND MM.MESSAGE_TYPE = 'RESPONSE'";
+                    "AND MM.MESSAGE_TYPE = 'RESPONSE')";
             Statement stmt = conn.createStatement();
-            ResultSet result = stmt.executeQuery(sql);
-            LOG.info("Идентификаторы запросов в финальных статусах выбраны.");
-            return result;
+            stmt.executeUpdate(sql);
+            LOG.info("Идентификаторы запросов в финальных статусах выбраны в таблицу REQ_TMP.");
         } catch (SQLException e) {
             LOG.error("Не удалось извлечь идентификаторы запросов в финальных статусах.");
-            LOG.error(e.getMessage());
-            return null;
+            throw e;
         }
     }
 
     /**
-     * Метод выбирает идентификаторы всех ответов на запросы, находящихся в финальном статусе,
-     * включая ответы типа STATUS.
-     * @return Идентификаторы всех ответов на запросы, находящиеся в финальном статусе
+     * Метод создает таблицу RESP_TMP и наполняет ее идентификаторами всех ответов на запросы,
+     * находящихся в финальном статусе, включая ответы типа STATUS.
+     *
+     * Метод должен вызываться после метода getWasteRequests!
+     *
+     * @return Количество всех ответов на запросы, находящиеся в финальном статусе
      */
-    private ResultSet getWasteResponses() {
+    private void getWasteResponses() throws SQLException {
         try {
-            String sql = "-- Выбираем идентификаторы всех ответов на запросы в финальном статусе\n" +
+            String sql = "CREATE TABLE RESP_TMP AS \n" +
                     "SELECT ID \n" +
                     "FROM CORE.MESSAGE_METADATA\n" +
                     "WHERE REFERENCE_ID IN \n" +
-                    "(\n" +
-                    "   -- Выбираем идентификаторы запросов, на которые получены ответы типа 'MESSAGE', 'REJECT' и 'ERROR'\n" +
-                    "   SELECT \n" +
-                    "   MM.REFERENCE_ID\n" +
-                    "   FROM CORE.MESSAGE_CONTENT MC\n" +
-                    "   LEFT JOIN CORE.MESSAGE_METADATA MM ON MC.ID = MM.ID\n" +
-                    "   WHERE MC.MODE IN ('MESSAGE', 'REJECT', 'ERROR')\n" +
-                    "   AND MM.MESSAGE_TYPE = 'RESPONSE'\n" +
-                    ")";
+                    "(SELECT REFERENCE_ID FROM REQ_TMP)";
             Statement stmt = conn.createStatement();
-            ResultSet result = stmt.executeQuery(sql);
-            LOG.info("Идентификаторы ответов на запросы в финальных статусах выбраны.");
-            return result;
+            stmt.executeUpdate(sql);
+            LOG.info("Идентификаторы ответов на запросы в финальных статусах выбраны в таблицу RESP_TMP.");
         } catch (SQLException e) {
             LOG.error("Не удалось извлечь идентификаторы ответов на запросы в финальных статусах.");
-            LOG.error(e.getMessage());
-            return null;
+            throw e;
         }
     }
 
     /**
-     * Метод удаляет все записи в базе данных, связанные с определенными сообщениями.
-     *
-     * @param ids2delete ResultSet с набором идентификаторов сообщений, которые необходимо удалить
+     * Метод сначала удаляет все записи в базе данных, связанные с ответами на запросы в финальных статусах.
+     * Затем метод удаляет все записи в базе данных, связанные с запросами в финальных статусах.
+     * В конце метод удаляет временные таблицы RESP_TMP и REQ_TMP.
      */
-    private void deleteMessages(ResultSet ids2delete) {
+    private void deleteMessages() throws SQLException {
         try {
-            // Подготавливаем запросы
-            String sqlMessageContent = "DELETE FROM CORE.MESSAGE_CONTENT WHERE ID = ?";
-            String sqlAttachments = "DELETE FROM CORE.ATTACHMENT_METADATA WHERE MESSAGE_METADATA_ID = ?";
-            String sqlMessageState = "DELETE FROM CORE.MESSAGE_STATE WHERE ID = ?";
-            String sqlMessageMetadata = "DELETE FROM CORE.MESSAGE_METADATA WHERE ID = ?";
-            PreparedStatement psAttachments = conn.prepareStatement(sqlAttachments);
-            PreparedStatement psMessageContent = conn.prepareStatement(sqlMessageContent);
-            PreparedStatement psMessageMetadata = conn.prepareStatement(sqlMessageMetadata);
-            PreparedStatement psMessageState = conn.prepareStatement(sqlMessageState);
-            while (ids2delete.next()) {
-                String clientID = ids2delete.getString(1);
-                psMessageContent.setString(1, clientID);
-                psAttachments.setString(1, clientID);
-                psMessageState.setString(1, clientID);
-                psMessageMetadata.setString(1, clientID);
-                psAttachments.execute();
-                psMessageContent.execute();
-                psMessageMetadata.execute();
-                psMessageState.execute();
-            }
+            // Подготавливаем запросы на удаление ответов
+            String sqlRespAttachments = "DELETE FROM CORE.ATTACHMENT_METADATA WHERE MESSAGE_METADATA_ID IN (SELECT ID FROM RESP_TMP);";
+            String sqlRespMessageContent = "DELETE FROM CORE.MESSAGE_CONTENT WHERE ID IN (SELECT ID FROM RESP_TMP);";
+            String sqlRespMessageMetadata = "DELETE FROM CORE.MESSAGE_METADATA WHERE ID IN (SELECT ID FROM RESP_TMP);";
+            String sqlRespMessageState = "DELETE FROM CORE.MESSAGE_STATE WHERE ID IN (SELECT ID FROM RESP_TMP);";
+            // Создаем запрос
+            Statement statement = conn.createStatement();
+            // И выполняем запросы на удаление из разных таблиц
+            statement.executeUpdate(sqlRespAttachments);
+            LOG.info("Удалены ответы из ATTACHMENT_METADATA.");
+            statement.executeUpdate(sqlRespMessageContent);
+            LOG.info("Удалены ответы из MESSAGE_CONTENT.");
+            statement.executeUpdate(sqlRespMessageMetadata);
+            LOG.info("Удалены ответы из MESSAGE_METADATA.");
+            statement.executeUpdate(sqlRespMessageState);
+            LOG.info("Удалены ответы из MESSAGE_STATE.");
+
+            // Подготавливаем запросы на удаление запросов
+            String sqlReqAttachments = "DELETE FROM CORE.ATTACHMENT_METADATA WHERE MESSAGE_METADATA_ID IN (SELECT REFERENCE_ID FROM REQ_TMP);";
+            String sqlReqMessageContent = "DELETE FROM CORE.MESSAGE_CONTENT WHERE ID IN (SELECT REFERENCE_ID FROM REQ_TMP);";
+            String sqlReqMessageMetadata = "DELETE FROM CORE.MESSAGE_METADATA WHERE ID IN (SELECT REFERENCE_ID FROM REQ_TMP);";
+            String sqlReqMessageState = "DELETE FROM CORE.MESSAGE_STATE WHERE ID IN (SELECT REFERENCE_ID FROM REQ_TMP);";
+
+            // И выполняем запросы на удаление из разных таблиц
+            statement.executeUpdate(sqlReqAttachments);
+            LOG.info("Удалены запросы из ATTACHMENT_METADATA.");
+            statement.executeUpdate(sqlReqMessageContent);
+            LOG.info("Удалены запросы из MESSAGE_CONTENT.");
+            statement.executeUpdate(sqlReqMessageMetadata);
+            LOG.info("Удалены запросы из MESSAGE_METADATA.");
+            statement.executeUpdate(sqlReqMessageState);
+            LOG.info("Удалены запросы из MESSAGE_STATE.");
         } catch (SQLException e) {
             LOG.error("Не удалось удалить записи.");
-            LOG.error(e.getMessage());
+            throw e;
         }
     }
 
+    private void dropTempTables() {
+        try {
+            String sqlDropTables = "DROP TABLE REQ_TMP; DROP TABLE RESP_TMP;";
+            Statement statement = conn.createStatement();
+            statement.executeUpdate(sqlDropTables);
+            LOG.info("Временные таблицы удалены.");
+        } catch (SQLException e) {
+            LOG.error("Не удалось удалить временные таблицы.");
+        }
+    }
 }
