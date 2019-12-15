@@ -20,9 +20,11 @@ public class Main {
             LOG.error(e.getMessage());
             System.exit(1);
         }
-        // Создаем поток с этими настройками
-        CleanerThread cleanerThread = new CleanerThread(props);
-        // Запускаем поток
-        cleanerThread.start();
+        // Создаем подключение к БД с этими настройками
+        H2Connection connection = new H2Connection(props);
+        // Выполняем очистку базы данных
+        connection.clearDB();
+        // Закрываем подключение
+        connection.close();
     }
 }

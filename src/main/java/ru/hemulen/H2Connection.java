@@ -49,6 +49,7 @@ public class H2Connection {
     public void clearDB() {
         LOG.info("Начало очистки базы данных H2:");
         try {
+            dropTempTables(); // На случай, если предыдущий запуск завершился неудачей и таблицы не удалились
             getWasteRequests();
             getWasteResponses();
             deleteMessages();
@@ -69,14 +70,19 @@ public class H2Connection {
      */
     private void getWasteRequests() throws SQLException {
         try {
-            String sql = "CREATE TABLE REQ_TMP AS \n" +
-                    "(SELECT MM.REFERENCE_ID\n" +
-                    "FROM CORE.MESSAGE_METADATA MM\n" +
-                    "LEFT JOIN CORE.MESSAGE_CONTENT MC ON MC.ID = MM.ID\n" +
-                    "WHERE MC.MODE IN ('MESSAGE', 'REJECT', 'ERROR')\n" +
-                    "AND MM.MESSAGE_TYPE = 'RESPONSE')";
+            String sqlCreate = "CREATE TABLE REQ_TMP (REFERENCE_ID VARCHAR (50));\n" +
+                    "CREATE INDEX ref_id_idx ON REQ_TMP (REFERENCE_ID);";
+            String sqlInsert = "INSERT INTO REQ_TMP \n" +
+                    "SELECT MM.REFERENCE_ID \n" +
+                    "FROM CORE.MESSAGE_METADATA MM \n" +
+                    "LEFT JOIN CORE.MESSAGE_CONTENT MC ON MC.ID = MM.ID \n" +
+                    "WHERE MC.MODE IN ('MESSAGE', 'REJECT', 'ERROR') \n" +
+                    "AND MM.MESSAGE_TYPE = 'RESPONSE' \n" +
+                    "AND MM.REFERENCE_ID IS NOT NULL;";
             Statement stmt = conn.createStatement();
-            stmt.executeUpdate(sql);
+            stmt.executeUpdate(sqlCreate);
+            LOG.info("Создана временная таблица REQ_TMP");
+            stmt.executeUpdate(sqlInsert);
             LOG.info("Идентификаторы запросов в финальных статусах выбраны в таблицу REQ_TMP.");
         } catch (SQLException e) {
             LOG.error("Не удалось извлечь идентификаторы запросов в финальных статусах.");
@@ -94,13 +100,17 @@ public class H2Connection {
      */
     private void getWasteResponses() throws SQLException {
         try {
-            String sql = "CREATE TABLE RESP_TMP AS \n" +
+            String sqlCreate = "CREATE TABLE RESP_TMP (ID VARCHAR(50));\n" +
+                    "CREATE UNIQUE INDEX id_idx ON RESP_TMP (ID);";
+            String sqlInsert = "INSERT INTO RESP_TMP \n" +
                     "SELECT ID \n" +
-                    "FROM CORE.MESSAGE_METADATA\n" +
+                    "FROM CORE.MESSAGE_METADATA \n" +
                     "WHERE REFERENCE_ID IN \n" +
-                    "(SELECT REFERENCE_ID FROM REQ_TMP)";
+                    "(SELECT REFERENCE_ID FROM REQ_TMP);";
             Statement stmt = conn.createStatement();
-            stmt.executeUpdate(sql);
+            stmt.executeUpdate(sqlCreate);
+            LOG.info("Создана временная таблица RESP_TMP");
+            stmt.executeUpdate(sqlInsert);
             LOG.info("Идентификаторы ответов на запросы в финальных статусах выбраны в таблицу RESP_TMP.");
         } catch (SQLException e) {
             LOG.error("Не удалось извлечь идентификаторы ответов на запросы в финальных статусах.");
@@ -155,7 +165,7 @@ public class H2Connection {
 
     private void dropTempTables() {
         try {
-            String sqlDropTables = "DROP TABLE REQ_TMP; DROP TABLE RESP_TMP;";
+            String sqlDropTables = "DROP TABLE IF EXISTS REQ_TMP; DROP TABLE IF EXISTS RESP_TMP;";
             Statement statement = conn.createStatement();
             statement.executeUpdate(sqlDropTables);
             LOG.info("Временные таблицы удалены.");
